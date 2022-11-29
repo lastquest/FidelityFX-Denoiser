@@ -25,18 +25,30 @@ THE SOFTWARE.
 
 #include "ffx_denoiser_shadows_util.h"
 
+groupshared uint lds_lane_mask;
+
 void FFX_DNSR_Shadows_CopyResult(uint2 gtid, uint2 gid)
 {
     const uint2 did = gid * uint2(8, 4) + gtid;
     const uint linear_tile_index = FFX_DNSR_Shadows_LinearTileIndex(gid, FFX_DNSR_Shadows_GetBufferDimensions().x);
     const bool hit_light = FFX_DNSR_Shadows_HitsLight(did, gtid, gid);
     const uint lane_mask = hit_light ? FFX_DNSR_Shadows_GetBitMaskFromPixelPosition(did) : 0;
-    
-    //adding a memory barrier before WaveActiveBitOr for GPUs that can have wave lanes size < 32
-    if (WaveGetLaneCount() < 32)
-        GroupMemoryBarrierWithGroupSync();
-    
-    FFX_DNSR_Shadows_WriteMask(linear_tile_index, WaveActiveBitOr(lane_mask));
+      
+    // The kernel works with packs of 32 threads to pack 32 bits of the input signal into the buffer of dwords
+    if (WaveGetLaneCount() < 32) {
+        uint lane_idx = gtid.x + gtid.y * uint(8);
+        if (lane_idx == uint(0)) {
+            lds_lane_mask = uint(0);
+        }
+        GroupMemoryBarrierWithGroupSync(); // wait for lds_lane_mask
+        
+        InterlockedOr(lds_lane_mask, lane_mask); // Set the bit
+        
+        GroupMemoryBarrierWithGroupSync(); // wait for lds_lane_mask
+        if (lane_idx == uint(0))
+            FFX_DNSR_Shadows_WriteMask(linear_tile_index, lds_lane_mask);
+    } else
+        FFX_DNSR_Shadows_WriteMask(linear_tile_index, WaveActiveBitOr(lane_mask));
 }
  
 void FFX_DNSR_Shadows_PrepareShadowMask(uint2 gtid, uint2 gid)
